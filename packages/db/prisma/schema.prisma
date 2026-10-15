@@ -15,6 +15,67 @@ datasource db {
 
 model user {
   id                 String           @id            @default(uuid())
-  username           String
+  username           String           @unique
   password           String
+  createdAt          DateTime         @default(now())
+  boards             Board[]
+  cards              Card[]
+  comments           Comment[]
+}
+
+model Board {
+  id          String   @id     @default(uuid())
+  title       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  userId      String
+  user        user     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lists       List[]
+}
+
+model List {
+  id        String   @id     @default(uuid())
+  title     String
+  position  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  boardId   String
+  board     Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  cards     Card[]
+}
+
+model Card {
+  id          String    @id     @default(uuid())
+  title       String
+  description String?
+  position    Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  listId      String
+  list        List      @relation(fields: [listId], references: [id], onDelete: Cascade)
+  userId      String
+  user        user      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  labels      Label[]
+  comments    Comment[]
+}
+
+model Label {
+  id        String   @id     @default(uuid())
+  name      String
+  color     String
+  createdAt DateTime @default(now())
+  cardId    String
+  card      Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
+}
+
+model Comment {
+  id        String   @id     @default(uuid())
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  cardId    String
+  card      Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  userId    String
+  user      user     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

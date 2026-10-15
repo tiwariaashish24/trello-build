@@ -37,16 +37,135 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-app.get("/users", async (_req, res) => {
-  const users = await prisma.user.findMany({
-    select: {
-      id: true,
-      username: true,
-    },
-  });
+app.post("/signin", (req, res) => {
 
-  res.json({ users });
-});
+})
+
+app.post("/organization", (req, res) => {
+
+})
+
+app.get("/boards", (req, res) => {
+
+})
+
+
+app.post("/board", (req, res) => {
+
+})
+
+app.delete("/board", (req, res) => {
+  
+})
+
+app.delete("/organisation", (req, res) => {
+  
+})
+
+
+app.post("/invite", (req, res) => {
+  //emain and org id
+
+
+  if(user === newUser){
+    res.redirect("/signup")
+  }
+})
+
+
+
+
+app.post("/accept", (req, res) => {
+  //orgId: 
+
+})
+
+app.post("/section", (req, res) => {
+
+})
+
+app.put("/selection", (req, res) => {
+
+})
+
+
+app.post("/issue", (req, res) => {
+
+})
+
+app.get("/selections", (req, res) => {
+
+})
+
+
+app.get("/issues", (req, res) => {
+
+})
+
+app.get("/issues/:issueId", (req, res) => {
+
+})
+
+app.delete("/issue/:issueId", (req, res) => {
+
+})
+
+app.delete("/section", (req, res) => {
+  
+})
+
+app.delete("/membership", (req, res) => {
+  //userid and orgid
+})
+
+app.put("/board", (req, res) => {
+
+})
+
+app.put("/issue", (req, res) => {
+  
+})
+
+app.post("/comment", (req, res) => {
+
+})
+
+app.put("/comment", (req, res) => {
+  
+})
+
+app.delete("/comment", (req, res) => {
+  
+})
+
+
+app.put("/issue/move", (req, res) => {
+
+})
+
+
+app.get("/organisation", (req, res) => {
+  
+})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 app.listen(PORT, () => {
   console.log(`Server is listen on ${PORT}`);
