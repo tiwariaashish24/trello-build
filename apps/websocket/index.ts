@@ -20,19 +20,25 @@ server.on("connection", (socket) =>{
             const newUserId = Math.random();
             ROOMS[boardId].push({userId: newUserId,  socket: socket})
 
+            console.log(`User ${newUserId} joined board ${boardId}. Total users: ${ROOMS[boardId].length}`);
+
             for (let i =0; i < ROOMS[boardId].length; i++){
                 const user = ROOMS[boardId][i];
-                user.socket.send(JSON.stringify({
-                    type: "join",
-                    userId: newUserId
-                }))
+                if (user.socket !== socket) {
+                    user.socket.send(JSON.stringify({
+                        type: "join",
+                        userId: newUserId
+                    }))
+                }
 
             }
 
-            socket.send(JSON.stringify({
+            const initialState = {
                 type: "initial_state",
                 users: ROOMS[boardId].map(u => u.userId)
-            }))
+            };
+            console.log("Sending initial state:", initialState);
+            socket.send(JSON.stringify(initialState))
         }
     })
 
@@ -46,7 +52,7 @@ server.on("connection", (socket) =>{
                 userId: userExist.userId
             })))
         }
-
+ 
       })
     })
 })

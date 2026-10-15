@@ -39,15 +39,20 @@ function Board() {
 
     ws.onmessage = (ev) => {
       const data = JSON.parse(ev.data);
+      console.log("Received:", data);
+
       if (data.type === "initial_state"){
+        console.log("Initial state users:", data.users);
         setUsers(data.users.map(userId => ({id: userId})));
       }
 
       if(data.type === "join"){
-        setUsers(u => [...u, {id: data.userId}]);
+        console.log("User joined:", data.userId);
+        setUsers(u => u.find(x => x.id === data.userId) ? u : [...u, {id: data.userId}]);
       }
 
       if(data.type === "leave"){
+        console.log("User left:", data.userId);
         setUsers(u => u.filter(x => x.id != data.userId));
       }
     };

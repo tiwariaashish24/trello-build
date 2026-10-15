@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -12,70 +7,235 @@ datasource db {
   provider = "postgresql"
 }
 
-
-model user {
-  id                 String           @id            @default(uuid())
-  username           String           @unique
-  password           String
-  createdAt          DateTime         @default(now())
-  boards             Board[]
-  cards              Card[]
-  comments           Comment[]
+enum OrganizationRole {
+  MEMBER
+  ADMIN
 }
 
-model Board {
-  id          String   @id     @default(uuid())
-  title       String
+enum BoardRole {
+  VIEWER
+  EDITOR
+  ADMIN
+}
+
+enum IssuePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ActivityAction {
+  CREATED
+  UPDATED
+  MOVED
+  ASSIGNED
+  COMMENTED
+  ATTACHED
+  DELETED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   Membership[]
+  boardMembers  BoardMember[]
+  issueMappings IssueMapping[]
+  comments      Comment[]
+  activities    ActivityLog[]
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
   description String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  userId      String
-  user        user     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  lists       List[]
+  deletedAt   DateTime?
+
+  memberships Membership[]
+  boards      Board[]
 }
 
-model List {
-  id        String   @id     @default(uuid())
+model Membership {
+  id             String           @id @default(cuid())
+  userId         String
+  organizationId String
+  role           OrganizationRole @default(MEMBER)
+  accepted       Boolean          @default(false)
+  invitedEmail   String?
+  invitedAt      DateTime         @default(now())
+  acceptedAt     DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, accepted])
+}
+
+model Board {
+  id             String   @id @default(cuid())
+  title          String
+  description    String?
+  organizationId String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  archivedAt     DateTime?
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members      BoardMember[]
+  sections     Section[]
+  issues       Issue[]
+  labels       Label[]
+
+  @@index([organizationId])
+}
+
+model BoardMember {
+  id        String    @id @default(cuid())
+  userId    String
+  boardId   String
+  role      BoardRole @default(EDITOR)
+  createdAt DateTime  @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, boardId])
+  @@index([boardId])
+}
+
+model Section {
+  id        String   @id @default(cuid())
   title     String
-  position  Int
+  boardId   String
+  position  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  boardId   String
-  board     Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  cards     Card[]
+
+  board  Board   @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  issues Issue[]
+
+  @@index([boardId, position])
 }
 
-model Card {
-  id          String    @id     @default(uuid())
+model Issue {
+  id          String        @id @default(cuid())
   title       String
   description String?
-  position    Int
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  listId      String
-  list        List      @relation(fields: [listId], references: [id], onDelete: Cascade)
-  userId      String
-  user        user      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  labels      Label[]
-  comments    Comment[]
+  boardId     String
+  sectionId   String
+  priority    IssuePriority @default(MEDIUM)
+  position    Int           @default(0)
+  dueDate     DateTime?
+  startDate   DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  completedAt DateTime?
+  deletedAt   DateTime?
+
+  board         Board          @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  section       Section        @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  issueMappings IssueMapping[]
+  comments      Comment[]
+  labels        IssueLabel[]
+  attachments   Attachment[]
+  activities    ActivityLog[]
+
+  @@index([boardId, sectionId, position])
+  @@index([dueDate])
+  @@index([priority])
 }
 
-model Label {
-  id        String   @id     @default(uuid())
-  name      String
-  color     String
+model IssueMapping {
+  id        String   @id @default(cuid())
+  userId    String
+  issueId   String
   createdAt DateTime @default(now())
-  cardId    String
-  card      Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, issueId])
+  @@index([issueId])
 }
 
 model Comment {
-  id        String   @id     @default(uuid())
+  id        String   @id @default(cuid())
   content   String
+  userId    String
+  issueId   String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  cardId    String
-  card      Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
-  userId    String
-  user      user     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deletedAt DateTime?
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@index([issueId, createdAt])
+}
+
+model Label {
+  id        String   @id @default(cuid())
+  name      String
+  color     String   @default("#808080")
+  boardId   String
+  createdAt DateTime @default(now())
+
+  board  Board        @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  issues IssueLabel[]
+
+  @@unique([boardId, name])
+  @@index([boardId])
+}
+
+model IssueLabel {
+  issueId   String
+  labelId   String
+  createdAt DateTime @default(now())
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([issueId, labelId])
+  @@index([labelId])
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  fileName  String
+  fileUrl   String
+  mimeType  String?
+  size      Int?
+  issueId   String
+  createdAt DateTime @default(now())
+
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  @@index([issueId])
+}
+
+model ActivityLog {
+  id        String         @id @default(cuid())
+  action    ActivityAction
+  details   Json?
+  userId    String?
+  issueId   String?
+  createdAt DateTime       @default(now())
+
+  user  User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  issue Issue? @relation(fields: [issueId], references: [id], onDelete: SetNull)
+
+  @@index([issueId, createdAt])
+  @@index([userId, createdAt])
 }
