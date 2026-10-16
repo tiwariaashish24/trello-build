@@ -79,6 +79,25 @@ async function canEditBoard(boardId: string, userId: string) {
   return Boolean(board);
 }
 
+async function canAccessBoard(boardId: string, userId: string) {
+  const board = await prisma.board.findFirst({
+    where: {
+      id: boardId,
+      deletedAt: null,
+      OR: [
+        {
+          organization: {
+            memberships: { some: { userId, accepted: true } },
+          },
+        },
+        { members: { some: { userId } } },
+      ],
+    },
+    select: { id: true },
+  });
+  return Boolean(board);
+}
+
 async function isOrganizationAdmin(organizationId: string, userId: string) {
   const membership = await prisma.membership.findFirst({
     where: { organizationId, userId, accepted: true, role: "ADMIN" },
@@ -584,12 +603,21 @@ app.delete("/membership", authenticateToken, async (req, res) => {
 
 app.get("/boards", authenticateToken, async (req, res) => {
   const { organizationId } = req.query;
+  const userId = (req as any).user.userId as string;
 
   try {
     const boards = await prisma.board.findMany({
       where: {
         ...(organizationId && { organizationId: organizationId as string }),
         deletedAt: null,
+        OR: [
+          {
+            organization: {
+              memberships: { some: { userId, accepted: true } },
+            },
+          },
+          { members: { some: { userId } } },
+        ],
       },
       include: {
         sections: {
@@ -599,11 +627,6 @@ app.get("/boards", authenticateToken, async (req, res) => {
               orderBy: { position: "asc" },
               where: { deletedAt: null },
             },
-          },
-        },
-        members: {
-          include: {
-            user: true,
           },
         },
         labels: true,
@@ -638,7 +661,28 @@ app.get("/board/:boardId", authenticateToken, async (req, res) => {
         },
         members: {
           include: {
-            user: true,
+            user: {
+              select: { id: true, email: true, name: true, avatarUrl: true },
+            },
+          },
+        },
+        organization: {
+          select: {
+            memberships: {
+              where: { accepted: true },
+              select: {
+                userId: true,
+                role: true,
+                user: {
+                  select: {
+                    id: true,
+                    email: true,
+                    name: true,
+                    avatarUrl: true,
+                  },
+                },
+              },
+            },
           },
         },
         labels: true,
@@ -647,6 +691,10 @@ app.get("/board/:boardId", authenticateToken, async (req, res) => {
 
     if (!board) {
       res.status(404).json({ error: "Board not found" });
+      return;
+    }
+    if (!(await canAccessBoard(boardId, (req as any).user.userId))) {
+      res.status(403).json({ error: "You do not have access to this board" });
       return;
     }
 
