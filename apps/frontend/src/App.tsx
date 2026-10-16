@@ -13,10 +13,7 @@ export function App() {
         <Routes>
           <Route path="/login" element={<AuthPage />} />
           <Route path="/auth/callback" element={<AuthCallback />} />
-          <Route
-            path="/board/:boardId"
-            element={<BoardPage view="board" />}
-          />
+          <Route path="/board/:boardId" element={<BoardPage view="board" />} />
           <Route
             path="/board/:boardId/inbox"
             element={<BoardPage view="inbox" />}

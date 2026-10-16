@@ -30,11 +30,17 @@ const collisionDetection: CollisionDetection = (args) => {
   return pointerHits.length > 0 ? pointerHits : closestCorners(args);
 };
 
+type BoardView = "board" | "inbox" | "planner";
+
 function columnId(sectionId: string) {
   return `column-${sectionId}`;
 }
 
-export function BoardPage() {
+function dateInputValue(value?: string | null) {
+  return value ? new Date(value).toISOString().slice(0, 10) : "";
+}
+
+export function BoardPage({ view }: { view: BoardView }) {
   const { boardId } = useParams();
   const { token, user, logout } = useAuth();
   const [board, setBoard] = useState<Board | null>(null);
@@ -180,6 +186,30 @@ export function BoardPage() {
     }
   };
 
+  const toggleComplete = async (issue: Issue) => {
+    if (!board) return;
+    const completedAt = issue.completedAt ? null : new Date().toISOString();
+    setError("");
+    setBoard({
+      ...board,
+      sections: board.sections.map((section) => ({
+        ...section,
+        issues: section.issues.map((item) =>
+          item.id === issue.id ? { ...item, completedAt } : item,
+        ),
+      })),
+    });
+    try {
+      await api(`/issue/${issue.id}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ completedAt }),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update card");
+      await fetchBoard();
+    }
+  };
+
   const handleDragStart = (event: DragStartEvent) => {
     const issue = board?.sections
       .flatMap((section) => section.issues)
@@ -285,6 +315,7 @@ export function BoardPage() {
           <Link className="workspace-link" to="/">
             Workspaces
           </Link>
+          <span className="board-context">{board?.title || "Board"}</span>
         </div>
         <div className="topbar-right">
           <span className="online-indicator">
@@ -319,7 +350,13 @@ export function BoardPage() {
         <>
           <section className="board-heading">
             <div className="board-heading-copy">
-              <p className="eyebrow">Workspace board</p>
+              <p className="eyebrow">
+                {view === "inbox"
+                  ? "Card inbox"
+                  : view === "planner"
+                    ? "Due dates"
+                    : "Workspace board"}
+              </p>
               {editingBoard ? (
                 <form
                   className="board-title-form"
@@ -365,8 +402,12 @@ export function BoardPage() {
                 </div>
               )}
               <p className="muted board-description">
-                {board.description ||
-                  "Keep your work moving. Drag cards between lists to update their status."}
+                {view === "inbox"
+                  ? "Open cards across this board, ready for your next step."
+                  : view === "planner"
+                    ? "Plan work by due date. Add or change dates from any card."
+                    : board.description ||
+                      "Keep your work moving. Drag cards between lists to update their status."}
               </p>
             </div>
             <div className="board-summary">
@@ -385,62 +426,263 @@ export function BoardPage() {
             </div>
           </section>
 
-          <DndContext
-            sensors={sensors}
-            collisionDetection={collisionDetection}
-            onDragStart={handleDragStart}
-            onDragEnd={(event) => void handleDragEnd(event)}
-            onDragCancel={() => setActiveIssue(null)}
-          >
-            <main className="board-columns" aria-label="Board lists">
-              {board.sections.map((section) => (
-                <KanbanColumn
-                  key={section.id}
-                  section={section}
-                  token={token}
-                  onChanged={fetchBoard}
-                  onError={setError}
-                  onRename={updateSection}
-                  onDelete={deleteSection}
-                />
-              ))}
-              <form
-                className="column add-column"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void createSection();
-                }}
-              >
-                <label className="sr-only" htmlFor="new-list-title">
-                  New list name
-                </label>
-                <input
-                  id="new-list-title"
-                  type="text"
-                  placeholder="+ Add another list"
-                  value={sectionTitle}
-                  onChange={(event) => setSectionTitle(event.target.value)}
-                />
-                {sectionTitle.trim() && (
-                  <button className="primary" type="submit">
-                    Add list
-                  </button>
-                )}
-              </form>
-            </main>
-            <DragOverlay>
-              {activeIssue ? (
-                <article className="card overlay-card">
-                  <span className="card-priority" aria-hidden="true" />
-                  <h3>{activeIssue.title}</h3>
-                  {activeIssue.description && <p>{activeIssue.description}</p>}
-                </article>
-              ) : null}
-            </DragOverlay>
-          </DndContext>
+          {view === "board" ? (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={collisionDetection}
+              onDragStart={handleDragStart}
+              onDragEnd={(event) => void handleDragEnd(event)}
+              onDragCancel={() => setActiveIssue(null)}
+            >
+              <main className="board-columns" aria-label="Board lists">
+                {board.sections.map((section) => (
+                  <KanbanColumn
+                    key={section.id}
+                    section={section}
+                    token={token}
+                    onChanged={fetchBoard}
+                    onError={setError}
+                    onRename={updateSection}
+                    onDelete={deleteSection}
+                    onToggleComplete={toggleComplete}
+                  />
+                ))}
+                <form
+                  className="column add-column"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void createSection();
+                  }}
+                >
+                  <label className="sr-only" htmlFor="new-list-title">
+                    New list name
+                  </label>
+                  <input
+                    id="new-list-title"
+                    type="text"
+                    placeholder="+ Add another list"
+                    value={sectionTitle}
+                    onChange={(event) => setSectionTitle(event.target.value)}
+                  />
+                  {sectionTitle.trim() && (
+                    <button className="primary" type="submit">
+                      Add list
+                    </button>
+                  )}
+                </form>
+              </main>
+              <DragOverlay>
+                {activeIssue ? (
+                  <article className="card overlay-card">
+                    <span className="card-priority" aria-hidden="true" />
+                    <h3>{activeIssue.title}</h3>
+                    {activeIssue.description && (
+                      <p>{activeIssue.description}</p>
+                    )}
+                  </article>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
+          ) : view === "inbox" ? (
+            <InboxView board={board} onToggleComplete={toggleComplete} />
+          ) : (
+            <PlannerView board={board} onToggleComplete={toggleComplete} />
+          )}
         </>
       )}
+      {board && (
+        <nav className="board-dock" aria-label="Board navigation">
+          <Link
+            className={`dock-link ${view === "inbox" ? "is-active" : ""}`}
+            to={`/board/${board.id}/inbox`}
+            aria-current={view === "inbox" ? "page" : undefined}
+          >
+            <span aria-hidden="true">▣</span>
+            Inbox
+          </Link>
+          <Link
+            className={`dock-link ${view === "planner" ? "is-active" : ""}`}
+            to={`/board/${board.id}/planner`}
+            aria-current={view === "planner" ? "page" : undefined}
+          >
+            <span aria-hidden="true">◷</span>
+            Planner
+          </Link>
+          <Link
+            className={`dock-link ${view === "board" ? "is-active" : ""}`}
+            to={`/board/${board.id}`}
+            aria-current={view === "board" ? "page" : undefined}
+          >
+            <span aria-hidden="true">▥</span>
+            Board
+          </Link>
+          <Link className="dock-link" to="/" aria-label="Switch boards">
+            <span aria-hidden="true">⇄</span>
+            Switch boards
+          </Link>
+        </nav>
+      )}
     </div>
+  );
+}
+
+function InboxView({
+  board,
+  onToggleComplete,
+}: {
+  board: Board;
+  onToggleComplete: (issue: Issue) => Promise<void>;
+}) {
+  const issues = board.sections
+    .flatMap((section) =>
+      section.issues
+        .filter((issue) => !issue.completedAt)
+        .map((issue) => ({ ...issue, sectionTitle: section.title })),
+    )
+    .sort((a, b) => {
+      const priorityOrder = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+      return priorityOrder[a.priority] - priorityOrder[b.priority];
+    });
+
+  return (
+    <main className="focus-view inbox-view" aria-label="Inbox cards">
+      <div className="focus-view-heading">
+        <div>
+          <p className="eyebrow">Needs attention</p>
+          <h2>Open cards</h2>
+        </div>
+        <span className="focus-count">{issues.length}</span>
+      </div>
+      {issues.length ? (
+        <div className="focus-card-list">
+          {issues.map((issue) => (
+            <article className="focus-card" key={issue.id}>
+              <button
+                className="completion-toggle"
+                type="button"
+                aria-label={`Mark "${issue.title}" complete`}
+                onClick={() => void onToggleComplete(issue)}
+              />
+              <div className="focus-card-copy">
+                <h3>{issue.title}</h3>
+                <p>
+                  {issue.sectionTitle} <span>·</span>{" "}
+                  {issue.priority.toLowerCase()}
+                  {issue.dueDate && (
+                    <>
+                      <span> · </span>
+                      Due {new Date(issue.dueDate).toLocaleDateString()}
+                    </>
+                  )}
+                </p>
+              </div>
+              <Link
+                className="focus-card-link"
+                to={`/board/${board.id}#${issue.id}`}
+                title="Open this card on the board"
+              >
+                Open board <span aria-hidden="true">↗</span>
+              </Link>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="focus-empty">
+          <span aria-hidden="true">✓</span>
+          <h3>Inbox is clear</h3>
+          <p>New and unfinished cards on this board will show up here.</p>
+          <Link className="quiet-button" to={`/board/${board.id}`}>
+            Back to board
+          </Link>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function PlannerView({
+  board,
+  onToggleComplete,
+}: {
+  board: Board;
+  onToggleComplete: (issue: Issue) => Promise<void>;
+}) {
+  const scheduled = board.sections
+    .flatMap((section) =>
+      section.issues
+        .filter((issue) => issue.dueDate && !issue.completedAt)
+        .map((issue) => ({ ...issue, sectionTitle: section.title })),
+    )
+    .sort(
+      (a, b) => new Date(a.dueDate!).getTime() - new Date(b.dueDate!).getTime(),
+    );
+  const groups = new Map<string, typeof scheduled>();
+  for (const issue of scheduled) {
+    const date = dateInputValue(issue.dueDate);
+    const dayIssues = groups.get(date) ?? [];
+    dayIssues.push(issue);
+    groups.set(date, dayIssues);
+  }
+
+  return (
+    <main className="focus-view planner-view" aria-label="Planner">
+      <div className="focus-view-heading">
+        <div>
+          <p className="eyebrow">Scheduled work</p>
+          <h2>Planner</h2>
+        </div>
+        <span className="focus-count">{scheduled.length}</span>
+      </div>
+      {groups.size ? (
+        <div className="planner-days">
+          {[...groups.entries()].map(([date, issues]) => (
+            <section className="planner-day" key={date}>
+              <h3>
+                <time dateTime={date}>
+                  {new Date(`${date}T12:00:00`).toLocaleDateString(undefined, {
+                    weekday: "short",
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </time>
+                <span>{issues.length}</span>
+              </h3>
+              <div className="focus-card-list">
+                {issues.map((issue) => (
+                  <article className="focus-card" key={issue.id}>
+                    <button
+                      className="completion-toggle"
+                      type="button"
+                      aria-label={`Mark "${issue.title}" complete`}
+                      onClick={() => void onToggleComplete(issue)}
+                    />
+                    <div className="focus-card-copy">
+                      <h3>{issue.title}</h3>
+                      <p>{issue.sectionTitle}</p>
+                    </div>
+                    <Link
+                      className="focus-card-link"
+                      to={`/board/${board.id}#${issue.id}`}
+                    >
+                      Open board <span aria-hidden="true">↗</span>
+                    </Link>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      ) : (
+        <div className="focus-empty">
+          <span aria-hidden="true">◷</span>
+          <h3>Nothing planned yet</h3>
+          <p>Add a due date to a card to see it in your planner.</p>
+          <Link className="quiet-button" to={`/board/${board.id}`}>
+            Schedule a card
+          </Link>
+        </div>
+      )}
+    </main>
   );
 }
 
@@ -451,6 +693,7 @@ function KanbanColumn({
   onError,
   onRename,
   onDelete,
+  onToggleComplete,
 }: {
   section: Section;
   token: string;
@@ -458,6 +701,7 @@ function KanbanColumn({
   onError: (message: string) => void;
   onRename: (sectionId: string, title: string) => Promise<void>;
   onDelete: (sectionId: string) => Promise<void>;
+  onToggleComplete: (issue: Issue) => Promise<void>;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: columnId(section.id) });
   const [title, setTitle] = useState("");
@@ -606,6 +850,7 @@ function KanbanColumn({
               token={token}
               onChanged={onChanged}
               onError={onError}
+              onToggleComplete={onToggleComplete}
             />
           ))}
         </SortableContext>
@@ -647,15 +892,19 @@ function KanbanCard({
   token,
   onChanged,
   onError,
+  onToggleComplete,
 }: {
   issue: Issue;
   token: string;
   onChanged: () => Promise<void>;
   onError: (message: string) => void;
+  onToggleComplete: (issue: Issue) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(issue.title);
   const [description, setDescription] = useState(issue.description || "");
+  const [priority, setPriority] = useState(issue.priority);
+  const [dueDate, setDueDate] = useState(dateInputValue(issue.dueDate));
   const [busy, setBusy] = useState(false);
   const {
     attributes,
@@ -683,6 +932,10 @@ function KanbanCard({
         body: JSON.stringify({
           title: nextTitle,
           description: description.trim(),
+          priority,
+          dueDate: dueDate
+            ? new Date(`${dueDate}T12:00:00`).toISOString()
+            : null,
         }),
       });
       setEditing(false);
@@ -710,6 +963,7 @@ function KanbanCard({
 
   return (
     <article
+      id={issue.id}
       ref={setNodeRef}
       className={`card ${isDragging ? "is-dragging" : ""}`}
       style={{ transform: CSS.Transform.toString(transform), transition }}
@@ -734,6 +988,30 @@ function KanbanCard({
             value={description}
             onChange={(event) => setDescription(event.target.value)}
           />
+          <div className="card-edit-fields">
+            <label>
+              Priority
+              <select
+                value={priority}
+                onChange={(event) =>
+                  setPriority(event.target.value as Issue["priority"])
+                }
+              >
+                <option value="LOW">Low</option>
+                <option value="MEDIUM">Medium</option>
+                <option value="HIGH">High</option>
+                <option value="URGENT">Urgent</option>
+              </select>
+            </label>
+            <label>
+              Due date
+              <input
+                type="date"
+                value={dueDate}
+                onChange={(event) => setDueDate(event.target.value)}
+              />
+            </label>
+          </div>
           <div className="card-actions">
             <button className="primary" type="submit" disabled={busy}>
               Save
@@ -744,6 +1022,8 @@ function KanbanCard({
               onClick={() => {
                 setTitle(issue.title);
                 setDescription(issue.description || "");
+                setPriority(issue.priority);
+                setDueDate(dateInputValue(issue.dueDate));
                 setEditing(false);
               }}
             >
@@ -765,7 +1045,27 @@ function KanbanCard({
           <span className="card-priority" aria-hidden="true" />
           <h3>{issue.title}</h3>
           {issue.description && <p>{issue.description}</p>}
+          <div className="card-meta">
+            {issue.dueDate && (
+              <span>Due {new Date(issue.dueDate).toLocaleDateString()}</span>
+            )}
+            <span
+              className={`priority-label priority-${issue.priority.toLowerCase()}`}
+            >
+              {issue.priority.toLowerCase()}
+            </span>
+            {issue.completedAt && (
+              <span className="card-complete-label">Complete</span>
+            )}
+          </div>
           <div className="card-actions">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void onToggleComplete(issue)}
+            >
+              {issue.completedAt ? "Reopen" : "Complete"}
+            </button>
             <button type="button" onClick={() => setEditing(true)}>
               Edit
             </button>
