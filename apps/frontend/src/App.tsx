@@ -4,6 +4,7 @@ import { AuthCallback } from "./pages/AuthCallback";
 import { AuthPage } from "./pages/AuthPage";
 import { BoardPage } from "./pages/BoardPage";
 import { Dashboard } from "./pages/Dashboard";
+import { WorkspaceView } from "./pages/WorkspaceView";
 import "./index.css";
 
 export function App() {
@@ -22,6 +23,9 @@ export function App() {
             path="/board/:boardId/planner"
             element={<BoardPage view="planner" />}
           />
+          <Route path="/inbox" element={<WorkspaceView view="inbox" />} />
+          <Route path="/planner" element={<WorkspaceView view="planner" />} />
+          <Route path="/boards" element={<WorkspaceView view="boards" />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

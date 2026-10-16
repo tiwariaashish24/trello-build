@@ -22,6 +22,52 @@ export type Issue = {
   completedAt?: string | null;
 };
 
+export type Label = {
+  id: string;
+  name: string;
+  color: string;
+  boardId: string;
+};
+
+export type IssueComment = {
+  id: string;
+  content: string;
+  userId: string;
+  issueId: string;
+  createdAt: string;
+  user: AuthUser;
+};
+
+export type IssueAssignment = {
+  id: string;
+  userId: string;
+  issueId: string;
+  user: AuthUser;
+};
+
+export type IssueAttachment = {
+  id: string;
+  fileName: string;
+  fileUrl: string;
+  mimeType?: string | null;
+  size?: number | null;
+  issueId: string;
+  createdAt: string;
+};
+
+export type IssueDetails = Issue & {
+  comments: IssueComment[];
+  issueMappings: IssueAssignment[];
+  labels: { issueId: string; labelId: string; label: Label }[];
+  attachments: IssueAttachment[];
+};
+
+export type BoardMember = {
+  userId: string;
+  role: string;
+  user: AuthUser;
+};
+
 export type Section = {
   id: string;
   title: string;
@@ -36,6 +82,18 @@ export type Board = {
   description?: string | null;
   organizationId: string;
   sections: Section[];
+  labels?: Label[];
+  members?: { userId: string; role: string; user: AuthUser }[];
+  organization?: {
+    memberships: BoardMember[];
+  };
+};
+
+export type AccessibleBoard = Pick<
+  Board,
+  "id" | "title" | "description" | "organizationId" | "sections"
+> & {
+  organization: { id: string; name: string };
 };
 
 export type Organization = {

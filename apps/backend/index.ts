@@ -449,11 +449,9 @@ app.post("/invite", authenticateToken, async (req, res) => {
       return;
     }
     if (!user) {
-      res
-        .status(404)
-        .json({
-          error: "Create an account with this email before inviting them",
-        });
+      res.status(404).json({
+        error: "Create an account with this email before inviting them",
+      });
       return;
     }
 
@@ -630,6 +628,9 @@ app.get("/boards", authenticateToken, async (req, res) => {
           },
         },
         labels: true,
+        organization: {
+          select: { id: true, name: true },
+        },
       },
     });
 
@@ -714,6 +715,14 @@ app.post("/board", authenticateToken, async (req, res) => {
   }
 
   try {
+    if (
+      !(await isOrganizationAdmin(organizationId, (req as any).user.userId))
+    ) {
+      res
+        .status(403)
+        .json({ error: "Only workspace admins can create boards" });
+      return;
+    }
     const board = await prisma.board.create({
       data: {
         title,
@@ -925,12 +934,20 @@ app.put("/section/:sectionId", authenticateToken, async (req, res) => {
   }
 });
 
-app.get("/sections", async (req, res) => {
+app.get("/sections", authenticateToken, async (req, res) => {
   const { boardId } = req.query;
 
+  if (typeof boardId !== "string") {
+    res.status(400).json({ error: "boardId is required" });
+    return;
+  }
   try {
+    if (!(await canAccessBoard(boardId, (req as any).user.userId))) {
+      res.status(404).json({ error: "Board not found" });
+      return;
+    }
     const sections = await prisma.section.findMany({
-      where: boardId ? { boardId: boardId as string } : undefined,
+      where: { boardId },
       orderBy: { position: "asc" },
       include: {
         issues: {
@@ -1211,14 +1228,22 @@ app.put("/issue/:issueId", authenticateToken, async (req, res) => {
   }
 });
 
-app.get("/issues", async (req, res) => {
+app.get("/issues", authenticateToken, async (req, res) => {
   const { sectionId, boardId } = req.query;
 
+  if (typeof boardId !== "string") {
+    res.status(400).json({ error: "boardId is required" });
+    return;
+  }
   try {
+    if (!(await canAccessBoard(boardId, (req as any).user.userId))) {
+      res.status(404).json({ error: "Board not found" });
+      return;
+    }
     const issues = await prisma.issue.findMany({
       where: {
         ...(sectionId && { sectionId: sectionId as string }),
-        ...(boardId && { boardId: boardId as string }),
+        boardId,
         deletedAt: null,
       },
       orderBy: { position: "asc" },
@@ -1230,11 +1255,17 @@ app.get("/issues", async (req, res) => {
         },
         comments: {
           where: { deletedAt: null },
-          include: { user: true },
+          include: {
+            user: {
+              select: { id: true, email: true, name: true, avatarUrl: true },
+            },
+          },
         },
         issueMappings: {
           include: {
-            user: true,
+            user: {
+              select: { id: true, email: true, name: true, avatarUrl: true },
+            },
           },
         },
         attachments: true,
@@ -1248,31 +1279,36 @@ app.get("/issues", async (req, res) => {
   }
 });
 
-app.get("/issue/:issueId", async (req, res) => {
+app.get("/issue/:issueId", authenticateToken, async (req, res) => {
   const { issueId } = req.params;
 
   try {
     const issue = await prisma.issue.findUnique({
       where: { id: issueId },
       include: {
-        labels: {
-          include: {
-            label: true,
-          },
-        },
         comments: {
           where: { deletedAt: null },
-          include: { user: true },
+          orderBy: { createdAt: "asc" },
+          include: {
+            user: {
+              select: { id: true, email: true, name: true, avatarUrl: true },
+            },
+          },
         },
         issueMappings: {
           include: {
-            user: true,
+            user: {
+              select: { id: true, email: true, name: true, avatarUrl: true },
+            },
           },
         },
-        attachments: true,
+        labels: { include: { label: true } },
+        attachments: { orderBy: { createdAt: "desc" } },
         activities: {
           include: {
-            user: true,
+            user: {
+              select: { id: true, email: true, name: true, avatarUrl: true },
+            },
           },
           orderBy: { createdAt: "desc" },
         },
@@ -1281,6 +1317,10 @@ app.get("/issue/:issueId", async (req, res) => {
 
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    if (!(await canAccessBoard(issue.boardId, (req as any).user.userId))) {
+      res.status(403).json({ error: "You do not have access to this board" });
       return;
     }
 
@@ -1324,7 +1364,7 @@ app.delete("/issue/:issueId", authenticateToken, async (req, res) => {
 
 // ==================== ISSUE MAPPINGS (Assignments) ====================
 
-app.post("/issue-mapping", async (req, res) => {
+app.post("/issue-mapping", authenticateToken, async (req, res) => {
   const { userId, issueId } = req.body ?? {};
 
   if (typeof userId !== "string" || typeof issueId !== "string") {
@@ -1333,13 +1373,58 @@ app.post("/issue-mapping", async (req, res) => {
   }
 
   try {
+    const issue = await prisma.issue.findUnique({
+      where: { id: issueId },
+      select: { boardId: true },
+    });
+    if (
+      !issue ||
+      !(await canAccessBoard(issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+    if (!(await canEditBoard(issue.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this card" });
+      return;
+    }
+    const board = await prisma.board.findUnique({
+      where: { id: issue.boardId },
+      select: {
+        organization: {
+          select: {
+            memberships: {
+              where: { userId, accepted: true },
+              select: { id: true },
+            },
+          },
+        },
+        members: {
+          where: { userId },
+          select: { id: true },
+        },
+      },
+    });
+    if (
+      !board ||
+      (!board.organization.memberships.length && !board.members.length)
+    ) {
+      res
+        .status(400)
+        .json({ error: "Assignee must be a member of this board's workspace" });
+      return;
+    }
     const mapping = await prisma.issueMapping.create({
       data: {
         userId,
         issueId,
       },
       include: {
-        user: true,
+        user: {
+          select: { id: true, email: true, name: true, avatarUrl: true },
+        },
       },
     });
 
@@ -1350,10 +1435,29 @@ app.post("/issue-mapping", async (req, res) => {
   }
 });
 
-app.delete("/issue-mapping/:mappingId", async (req, res) => {
+app.delete("/issue-mapping/:mappingId", authenticateToken, async (req, res) => {
   const { mappingId } = req.params;
 
   try {
+    const mapping = await prisma.issueMapping.findUnique({
+      where: { id: mappingId },
+      select: { issue: { select: { boardId: true } } },
+    });
+    if (
+      !mapping ||
+      !(await canAccessBoard(mapping.issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Assignment not found" });
+      return;
+    }
+    if (
+      !(await canEditBoard(mapping.issue.boardId, (req as any).user.userId))
+    ) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this card" });
+      return;
+    }
     await prisma.issueMapping.delete({
       where: { id: mappingId },
     });
@@ -1367,7 +1471,29 @@ app.delete("/issue-mapping/:mappingId", async (req, res) => {
 
 // ==================== LABELS ====================
 
-app.post("/label", async (req, res) => {
+app.get("/labels", authenticateToken, async (req, res) => {
+  const { boardId } = req.query;
+  if (typeof boardId !== "string") {
+    res.status(400).json({ error: "boardId is required" });
+    return;
+  }
+  try {
+    if (!(await canAccessBoard(boardId, (req as any).user.userId))) {
+      res.status(404).json({ error: "Board not found" });
+      return;
+    }
+    const labels = await prisma.label.findMany({
+      where: { boardId },
+      orderBy: { name: "asc" },
+    });
+    res.json(labels);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch labels" });
+  }
+});
+
+app.post("/label", authenticateToken, async (req, res) => {
   const { name, color, boardId } = req.body ?? {};
 
   if (typeof name !== "string" || typeof boardId !== "string") {
@@ -1376,6 +1502,12 @@ app.post("/label", async (req, res) => {
   }
 
   try {
+    if (!(await canEditBoard(boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
     const label = await prisma.label.create({
       data: {
         name,
@@ -1391,11 +1523,25 @@ app.post("/label", async (req, res) => {
   }
 });
 
-app.put("/label/:labelId", async (req, res) => {
+app.put("/label/:labelId", authenticateToken, async (req, res) => {
   const { labelId } = req.params;
   const { name, color } = req.body ?? {};
 
   try {
+    const existing = await prisma.label.findUnique({
+      where: { id: labelId },
+      select: { boardId: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Label not found" });
+      return;
+    }
+    if (!(await canEditBoard(existing.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
     const label = await prisma.label.update({
       where: { id: labelId },
       data: {
@@ -1411,10 +1557,24 @@ app.put("/label/:labelId", async (req, res) => {
   }
 });
 
-app.delete("/label/:labelId", async (req, res) => {
+app.delete("/label/:labelId", authenticateToken, async (req, res) => {
   const { labelId } = req.params;
 
   try {
+    const existing = await prisma.label.findUnique({
+      where: { id: labelId },
+      select: { boardId: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Label not found" });
+      return;
+    }
+    if (!(await canEditBoard(existing.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
     await prisma.label.delete({
       where: { id: labelId },
     });
@@ -1428,7 +1588,7 @@ app.delete("/label/:labelId", async (req, res) => {
 
 // ==================== ISSUE LABELS ====================
 
-app.post("/issue-label", async (req, res) => {
+app.post("/issue-label", authenticateToken, async (req, res) => {
   const { issueId, labelId } = req.body ?? {};
 
   if (typeof issueId !== "string" || typeof labelId !== "string") {
@@ -1437,6 +1597,26 @@ app.post("/issue-label", async (req, res) => {
   }
 
   try {
+    const [issue, label] = await Promise.all([
+      prisma.issue.findUnique({
+        where: { id: issueId },
+        select: { boardId: true },
+      }),
+      prisma.label.findUnique({
+        where: { id: labelId },
+        select: { boardId: true },
+      }),
+    ]);
+    if (!issue || !label || issue.boardId !== label.boardId) {
+      res.status(404).json({ error: "Card or matching board label not found" });
+      return;
+    }
+    if (!(await canEditBoard(issue.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this card" });
+      return;
+    }
     const issueLabel = await prisma.issueLabel.create({
       data: {
         issueId,
@@ -1454,7 +1634,7 @@ app.post("/issue-label", async (req, res) => {
   }
 });
 
-app.delete("/issue-label", async (req, res) => {
+app.delete("/issue-label", authenticateToken, async (req, res) => {
   const { issueId, labelId } = req.body ?? {};
 
   if (typeof issueId !== "string" || typeof labelId !== "string") {
@@ -1463,6 +1643,23 @@ app.delete("/issue-label", async (req, res) => {
   }
 
   try {
+    const issue = await prisma.issue.findUnique({
+      where: { id: issueId },
+      select: { boardId: true },
+    });
+    if (
+      !issue ||
+      !(await canAccessBoard(issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+    if (!(await canEditBoard(issue.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this card" });
+      return;
+    }
     await prisma.issueLabel.delete({
       where: {
         issueId_labelId: {
@@ -1481,29 +1678,36 @@ app.delete("/issue-label", async (req, res) => {
 
 // ==================== COMMENTS ====================
 
-app.post("/comment", async (req, res) => {
-  const { content, userId, issueId } = req.body ?? {};
+app.post("/comment", authenticateToken, async (req, res) => {
+  const { content, issueId } = req.body ?? {};
 
-  if (
-    typeof content !== "string" ||
-    typeof userId !== "string" ||
-    typeof issueId !== "string"
-  ) {
-    res
-      .status(400)
-      .json({ error: "content, userId, and issueId are required" });
+  if (typeof content !== "string" || typeof issueId !== "string") {
+    res.status(400).json({ error: "content and issueId are required" });
     return;
   }
 
   try {
+    const issue = await prisma.issue.findUnique({
+      where: { id: issueId },
+      select: { boardId: true },
+    });
+    if (
+      !issue ||
+      !(await canAccessBoard(issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
     const comment = await prisma.comment.create({
       data: {
-        content,
-        userId,
+        content: content.trim(),
+        userId: (req as any).user.userId,
         issueId,
       },
       include: {
-        user: true,
+        user: {
+          select: { id: true, email: true, name: true, avatarUrl: true },
+        },
       },
     });
 
@@ -1514,7 +1718,7 @@ app.post("/comment", async (req, res) => {
   }
 });
 
-app.put("/comment/:commentId", async (req, res) => {
+app.put("/comment/:commentId", authenticateToken, async (req, res) => {
   const { commentId } = req.params;
   const { content } = req.body ?? {};
 
@@ -1524,11 +1728,28 @@ app.put("/comment/:commentId", async (req, res) => {
   }
 
   try {
+    const existing = await prisma.comment.findUnique({
+      where: { id: commentId },
+      select: { userId: true, issue: { select: { boardId: true } } },
+    });
+    if (
+      !existing ||
+      !(await canAccessBoard(existing.issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Comment not found" });
+      return;
+    }
+    if (existing.userId !== (req as any).user.userId) {
+      res.status(403).json({ error: "Only the comment author can edit it" });
+      return;
+    }
     const comment = await prisma.comment.update({
       where: { id: commentId },
       data: { content },
       include: {
-        user: true,
+        user: {
+          select: { id: true, email: true, name: true, avatarUrl: true },
+        },
       },
     });
 
@@ -1539,10 +1760,25 @@ app.put("/comment/:commentId", async (req, res) => {
   }
 });
 
-app.delete("/comment/:commentId", async (req, res) => {
+app.delete("/comment/:commentId", authenticateToken, async (req, res) => {
   const { commentId } = req.params;
 
   try {
+    const existing = await prisma.comment.findUnique({
+      where: { id: commentId },
+      select: { userId: true, issue: { select: { boardId: true } } },
+    });
+    if (
+      !existing ||
+      !(await canAccessBoard(existing.issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Comment not found" });
+      return;
+    }
+    if (existing.userId !== (req as any).user.userId) {
+      res.status(403).json({ error: "Only the comment author can delete it" });
+      return;
+    }
     await prisma.comment.update({
       where: { id: commentId },
       data: { deletedAt: new Date() },
@@ -1557,7 +1793,7 @@ app.delete("/comment/:commentId", async (req, res) => {
 
 // ==================== ATTACHMENTS ====================
 
-app.post("/attachment", async (req, res) => {
+app.post("/attachment", authenticateToken, async (req, res) => {
   const { fileName, fileUrl, mimeType, size, issueId } = req.body ?? {};
 
   if (
@@ -1572,6 +1808,28 @@ app.post("/attachment", async (req, res) => {
   }
 
   try {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(fileUrl);
+    } catch {
+      res.status(400).json({ error: "fileUrl must be a valid HTTP(S) URL" });
+      return;
+    }
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      res.status(400).json({ error: "fileUrl must use HTTP or HTTPS" });
+      return;
+    }
+    const issue = await prisma.issue.findUnique({
+      where: { id: issueId },
+      select: { boardId: true },
+    });
+    if (
+      !issue ||
+      !(await canEditBoard(issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Card not found or not editable" });
+      return;
+    }
     const attachment = await prisma.attachment.create({
       data: {
         fileName,
@@ -1589,10 +1847,21 @@ app.post("/attachment", async (req, res) => {
   }
 });
 
-app.delete("/attachment/:attachmentId", async (req, res) => {
+app.delete("/attachment/:attachmentId", authenticateToken, async (req, res) => {
   const { attachmentId } = req.params;
 
   try {
+    const existing = await prisma.attachment.findUnique({
+      where: { id: attachmentId },
+      select: { issue: { select: { boardId: true } } },
+    });
+    if (
+      !existing ||
+      !(await canEditBoard(existing.issue.boardId, (req as any).user.userId))
+    ) {
+      res.status(404).json({ error: "Attachment not found or not editable" });
+      return;
+    }
     await prisma.attachment.delete({
       where: { id: attachmentId },
     });
