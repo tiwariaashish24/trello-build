@@ -1,12 +1,93 @@
 import express from "express";
+import cors from "cors";
 import { prisma } from "@trello/db/client";
+import jwt from "jsonwebtoken";
+import { config } from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+config({ path: resolve(dirname(fileURLToPath(import.meta.url)), ".env") });
 
 const app = express();
 const PORT = 3001;
+const JWT_SECRET =
+  process.env.JWT_SECRET || "your-secret-key-change-in-production";
+const allowedOrigins = [
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
+];
+const corsOptions = {
+  origin: allowedOrigins,
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || process.env.BUN_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.BUN_PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_PUBLISHABLE_KEY ||
+  "";
 
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 
-// USER AUTH 
+// AUTH MIDDLEWARE
+const authenticateToken = (req: any, res: any, next: any) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "Access token required" });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+    if (err) {
+      return res.status(403).json({ error: "Invalid or expired token" });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+async function canEditBoard(boardId: string, userId: string) {
+  const board = await prisma.board.findFirst({
+    where: {
+      id: boardId,
+      deletedAt: null,
+      OR: [
+        {
+          organization: {
+            memberships: {
+              some: { userId, accepted: true },
+            },
+          },
+        },
+        {
+          members: {
+            some: { userId, role: { in: ["EDITOR", "ADMIN"] } },
+          },
+        },
+      ],
+    },
+    select: { id: true },
+  });
+  return Boolean(board);
+}
+
+async function isOrganizationAdmin(organizationId: string, userId: string) {
+  const membership = await prisma.membership.findFirst({
+    where: { organizationId, userId, accepted: true, role: "ADMIN" },
+    select: { id: true },
+  });
+  return Boolean(membership);
+}
+
+// USER AUTH
 
 app.post("/signup", async (req, res) => {
   const { email, password, name } = req.body ?? {};
@@ -25,8 +106,13 @@ app.post("/signup", async (req, res) => {
       },
     });
 
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
     res.json({
       message: "User created successfully",
+      token,
       user: {
         id: user.id,
         email: user.email,
@@ -54,13 +140,18 @@ app.post("/signin", async (req, res) => {
       where: { email },
     });
 
-    if (!user || user.password !== password) {
+    if (!user || !user.password || user.password !== password) {
       res.status(401).json({ error: "Invalid credentials" });
       return;
     }
 
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
     res.json({
       message: "Sign in successful",
+      token,
       user: {
         id: user.id,
         email: user.email,
@@ -73,33 +164,123 @@ app.post("/signin", async (req, res) => {
   }
 });
 
-// ORGANIZATIONS
+app.post("/auth/oauth", async (req, res) => {
+  const { accessToken } = req.body ?? {};
 
-app.post("/organization", async (req, res) => {
-  const { name, description, userId } = req.body ?? {};
+  if (typeof accessToken !== "string" || !accessToken) {
+    res.status(400).json({ error: "accessToken is required" });
+    return;
+  }
 
-  if (typeof name !== "string" || typeof userId !== "string") {
-    res.status(400).json({ error: "name and userId are required" });
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    res.status(500).json({ error: "Supabase is not configured on the server" });
     return;
   }
 
   try {
-    const organization = await prisma.organization.create({
-      data: {
+    const supabaseRes = await fetch(
+      `${SUPABASE_URL.replace(/\/$/, "")}/auth/v1/user`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+      },
+    );
+
+    if (!supabaseRes.ok) {
+      res.status(401).json({ error: "Invalid Supabase session" });
+      return;
+    }
+
+    const supabaseUser = (await supabaseRes.json()) as {
+      email?: string;
+      user_metadata?: {
+        full_name?: string;
+        name?: string;
+        avatar_url?: string;
+        picture?: string;
+      };
+    };
+
+    if (!supabaseUser.email) {
+      res.status(400).json({ error: "Supabase user is missing an email" });
+      return;
+    }
+
+    const name =
+      supabaseUser.user_metadata?.full_name ||
+      supabaseUser.user_metadata?.name ||
+      null;
+    const avatarUrl =
+      supabaseUser.user_metadata?.avatar_url ||
+      supabaseUser.user_metadata?.picture ||
+      null;
+
+    const user = await prisma.user.upsert({
+      where: { email: supabaseUser.email },
+      create: {
+        email: supabaseUser.email,
         name,
-        description: description || null,
+        avatarUrl,
+        password: null,
+      },
+      update: {
+        ...(name ? { name } : {}),
+        ...(avatarUrl ? { avatarUrl } : {}),
       },
     });
 
-    // Create admin membership
-    await prisma.membership.create({
-      data: {
-        userId,
-        organizationId: organization.id,
-        role: "ADMIN",
-        accepted: true,
-        acceptedAt: new Date(),
+    const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    res.json({
+      message: "OAuth sign in successful",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatarUrl: user.avatarUrl,
       },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to complete OAuth sign in" });
+  }
+});
+
+// ORGANIZATIONS
+
+app.post("/organization", authenticateToken, async (req, res) => {
+  const { name, description } = req.body ?? {};
+
+  if (typeof name !== "string" || !name.trim()) {
+    res.status(400).json({ error: "A workspace name is required" });
+    return;
+  }
+
+  try {
+    const userId = (req as any).user.userId as string;
+    const organization = await prisma.$transaction(async (transaction) => {
+      const created = await transaction.organization.create({
+        data: {
+          name: name.trim(),
+          description:
+            typeof description === "string" ? description.trim() || null : null,
+        },
+      });
+      await transaction.membership.create({
+        data: {
+          userId,
+          organizationId: created.id,
+          role: "ADMIN",
+          accepted: true,
+          acceptedAt: new Date(),
+        },
+      });
+      return created;
     });
 
     res.json(organization);
@@ -109,20 +290,18 @@ app.post("/organization", async (req, res) => {
   }
 });
 
-app.get("/organizations", async (req, res) => {
-  const { userId } = req.query;
+app.get("/organizations", authenticateToken, async (req, res) => {
+  const userId = (req as any).user.userId as string;
 
   try {
     const organizations = await prisma.organization.findMany({
       where: {
-        ...(userId && {
-          memberships: {
-            some: {
-              userId: userId as string,
-              accepted: true,
-            },
+        memberships: {
+          some: {
+            userId,
+            accepted: true,
           },
-        }),
+        },
         deletedAt: null,
       },
       include: {
@@ -130,8 +309,21 @@ app.get("/organizations", async (req, res) => {
           where: { deletedAt: null },
         },
         memberships: {
-          include: {
-            user: true,
+          where: { accepted: true },
+          select: {
+            id: true,
+            userId: true,
+            organizationId: true,
+            role: true,
+            accepted: true,
+            user: {
+              select: {
+                id: true,
+                email: true,
+                name: true,
+                avatarUrl: true,
+              },
+            },
           },
         },
       },
@@ -144,78 +336,135 @@ app.get("/organizations", async (req, res) => {
   }
 });
 
-app.delete("/organization/:organizationId", async (req, res) => {
-  const { organizationId } = req.params;
+app.get("/organizations/invitations", authenticateToken, async (req, res) => {
+  const { userId, email } = (req as any).user as {
+    userId: string;
+    email: string;
+  };
 
   try {
-    await prisma.organization.update({
-      where: { id: organizationId },
-      data: { deletedAt: new Date() },
+    const invitations = await prisma.membership.findMany({
+      where: {
+        userId,
+        accepted: false,
+        invitedEmail: { equals: email, mode: "insensitive" },
+        organization: { deletedAt: null },
+      },
+      include: {
+        organization: {
+          select: { id: true, name: true, description: true },
+        },
+      },
+      orderBy: { invitedAt: "desc" },
     });
-
-    res.json({ message: "Organization deleted successfully" });
+    res.json(invitations);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Failed to delete organization" });
+    res.status(500).json({ error: "Failed to fetch workspace invitations" });
   }
 });
 
-//MEMBERSHIPS 
+app.delete(
+  "/organization/:organizationId",
+  authenticateToken,
+  async (req, res) => {
+    const { organizationId } = req.params;
 
-app.post("/invite", async (req, res) => {
+    try {
+      if (
+        !(await isOrganizationAdmin(organizationId, (req as any).user.userId))
+      ) {
+        res
+          .status(403)
+          .json({ error: "Only workspace admins can delete a workspace" });
+        return;
+      }
+      await prisma.organization.update({
+        where: { id: organizationId },
+        data: { deletedAt: new Date() },
+      });
+
+      res.json({ message: "Organization deleted successfully" });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to delete organization" });
+    }
+  },
+);
+
+//MEMBERSHIPS
+
+app.post("/invite", authenticateToken, async (req, res) => {
   const { email, organizationId } = req.body ?? {};
 
-  if (typeof email !== "string" || typeof organizationId !== "string") {
-    res.status(400).json({ error: "email and organizationId are required" });
+  if (
+    typeof email !== "string" ||
+    !email.trim() ||
+    typeof organizationId !== "string"
+  ) {
+    res
+      .status(400)
+      .json({ error: "A valid email and organizationId are required" });
     return;
   }
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { email },
-    });
-
-    let membership;
-
-    if (user) {
-      const existingMembership = await prisma.membership.findUnique({
-        where: {
-          userId_organizationId: {
-            userId: user.id,
-            organizationId,
-          },
-        },
-      });
-
-      if (existingMembership) {
-        res.status(400).json({ error: "User already a member" });
-        return;
-      }
-
-      membership = await prisma.membership.create({
-        data: {
-          userId: user.id,
-          organizationId,
-          invitedEmail: email,
-        },
-        include: {
-          user: true,
-          organization: true,
-        },
-      });
-    } else {
-      membership = await prisma.membership.create({
-        data: {
-          userId: "pending",
-          organizationId,
-          invitedEmail: email,
-        },
-        include: {
-          organization: true,
-        },
-      });
+    const currentUserId = (req as any).user.userId as string;
+    if (!(await isOrganizationAdmin(organizationId, currentUserId))) {
+      res
+        .status(403)
+        .json({ error: "Only workspace admins can invite members" });
+      return;
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+    const [user, organization] = await Promise.all([
+      prisma.user.findUnique({ where: { email: normalizedEmail } }),
+      prisma.organization.findFirst({
+        where: { id: organizationId, deletedAt: null },
+        select: { id: true },
+      }),
+    ]);
+    if (!organization) {
+      res.status(404).json({ error: "Workspace not found" });
+      return;
+    }
+    if (!user) {
+      res
+        .status(404)
+        .json({
+          error: "Create an account with this email before inviting them",
+        });
+      return;
+    }
+
+    const existing = await prisma.membership.findUnique({
+      where: {
+        userId_organizationId: { userId: user.id, organizationId },
+      },
+    });
+    if (existing) {
+      res.status(409).json({
+        error: existing.accepted
+          ? "This user is already a workspace member"
+          : "An invitation has already been sent to this user",
+      });
+      return;
+    }
+
+    const membership = await prisma.membership.create({
+      data: {
+        userId: user.id,
+        organizationId,
+        invitedEmail: normalizedEmail,
+      },
+      select: {
+        id: true,
+        invitedEmail: true,
+        invitedAt: true,
+        organization: { select: { id: true, name: true } },
+      },
+    });
     res.json(membership);
   } catch (error) {
     console.error(error);
@@ -223,29 +472,50 @@ app.post("/invite", async (req, res) => {
   }
 });
 
-app.post("/accept", async (req, res) => {
-  const { organizationId, userId } = req.body ?? {};
+app.post("/accept", authenticateToken, async (req, res) => {
+  const { organizationId } = req.body ?? {};
 
-  if (typeof organizationId !== "string" || typeof userId !== "string") {
-    res.status(400).json({ error: "organizationId and userId are required" });
+  if (typeof organizationId !== "string") {
+    res.status(400).json({ error: "organizationId is required" });
     return;
   }
 
   try {
+    const { userId, email } = (req as any).user as {
+      userId: string;
+      email: string;
+    };
+    const invitation = await prisma.membership.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+      select: { id: true, accepted: true, invitedEmail: true },
+    });
+    if (
+      !invitation ||
+      invitation.invitedEmail?.toLowerCase() !== email.toLowerCase()
+    ) {
+      res
+        .status(404)
+        .json({ error: "No invitation was found for this account" });
+      return;
+    }
+    if (invitation.accepted) {
+      res
+        .status(409)
+        .json({ error: "This invitation has already been accepted" });
+      return;
+    }
+
     const membership = await prisma.membership.update({
-      where: {
-        userId_organizationId: {
-          userId,
-          organizationId,
-        },
-      },
+      where: { id: invitation.id },
       data: {
         accepted: true,
         acceptedAt: new Date(),
       },
-      include: {
-        user: true,
-        organization: true,
+      select: {
+        id: true,
+        organizationId: true,
+        role: true,
+        organization: { select: { id: true, name: true, description: true } },
       },
     });
 
@@ -256,22 +526,51 @@ app.post("/accept", async (req, res) => {
   }
 });
 
-app.delete("/membership", async (req, res) => {
-  const { userId, organizationId } = req.body ?? {};
+app.delete("/membership", authenticateToken, async (req, res) => {
+  const { organizationId, userId: requestedUserId } = req.body ?? {};
 
-  if (typeof userId !== "string" || typeof organizationId !== "string") {
-    res.status(400).json({ error: "userId and organizationId are required" });
+  if (typeof organizationId !== "string") {
+    res.status(400).json({ error: "organizationId is required" });
     return;
   }
 
   try {
+    const currentUserId = (req as any).user.userId as string;
+    const userId =
+      typeof requestedUserId === "string" ? requestedUserId : currentUserId;
+    const isSelf = userId === currentUserId;
+    const membership = await prisma.membership.findUnique({
+      where: { userId_organizationId: { userId, organizationId } },
+      select: { id: true, role: true, accepted: true },
+    });
+    if (!membership) {
+      res.status(404).json({ error: "Workspace membership not found" });
+      return;
+    }
+    if (
+      !isSelf &&
+      !(await isOrganizationAdmin(organizationId, currentUserId))
+    ) {
+      res
+        .status(403)
+        .json({ error: "Only workspace admins can remove other members" });
+      return;
+    }
+    if (isSelf && membership.role === "ADMIN") {
+      const adminCount = await prisma.membership.count({
+        where: { organizationId, accepted: true, role: "ADMIN" },
+      });
+      if (adminCount === 1) {
+        res.status(409).json({
+          error:
+            "Promote another workspace member before leaving as the last admin",
+        });
+        return;
+      }
+    }
+
     await prisma.membership.delete({
-      where: {
-        userId_organizationId: {
-          userId,
-          organizationId,
-        },
-      },
+      where: { id: membership.id },
     });
 
     res.json({ message: "Membership deleted successfully" });
@@ -281,9 +580,9 @@ app.delete("/membership", async (req, res) => {
   }
 });
 
-//BOARDS 
+//BOARDS
 
-app.get("/boards", async (req, res) => {
+app.get("/boards", authenticateToken, async (req, res) => {
   const { organizationId } = req.query;
 
   try {
@@ -294,10 +593,10 @@ app.get("/boards", async (req, res) => {
       },
       include: {
         sections: {
-          orderBy: { position: 'asc' },
+          orderBy: { position: "asc" },
           include: {
             issues: {
-              orderBy: { position: 'asc' },
+              orderBy: { position: "asc" },
               where: { deletedAt: null },
             },
           },
@@ -318,7 +617,47 @@ app.get("/boards", async (req, res) => {
   }
 });
 
-app.post("/board", async (req, res) => {
+app.get("/board/:boardId", authenticateToken, async (req, res) => {
+  const { boardId } = req.params;
+
+  try {
+    const board = await prisma.board.findFirst({
+      where: {
+        id: boardId,
+        deletedAt: null,
+      },
+      include: {
+        sections: {
+          orderBy: { position: "asc" },
+          include: {
+            issues: {
+              orderBy: { position: "asc" },
+              where: { deletedAt: null },
+            },
+          },
+        },
+        members: {
+          include: {
+            user: true,
+          },
+        },
+        labels: true,
+      },
+    });
+
+    if (!board) {
+      res.status(404).json({ error: "Board not found" });
+      return;
+    }
+
+    res.json(board);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch board" });
+  }
+});
+
+app.post("/board", authenticateToken, async (req, res) => {
   const { title, description, organizationId } = req.body ?? {};
 
   if (typeof title !== "string" || typeof organizationId !== "string") {
@@ -342,11 +681,18 @@ app.post("/board", async (req, res) => {
   }
 });
 
-app.put("/board/:boardId", async (req, res) => {
+app.put("/board/:boardId", authenticateToken, async (req, res) => {
   const { boardId } = req.params;
   const { title, description, archivedAt } = req.body ?? {};
 
   try {
+    if (!(await canEditBoard(boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+
     const board = await prisma.board.update({
       where: { id: boardId },
       data: {
@@ -363,7 +709,7 @@ app.put("/board/:boardId", async (req, res) => {
   }
 });
 
-app.delete("/board/:boardId", async (req, res) => {
+app.delete("/board/:boardId", authenticateToken, async (req, res) => {
   const { boardId } = req.params;
 
   try {
@@ -381,7 +727,7 @@ app.delete("/board/:boardId", async (req, res) => {
 
 //BOARD MEMBERS
 
-app.post("/board-member", async (req, res) => {
+app.post("/board-member", authenticateToken, async (req, res) => {
   const { userId, boardId, role } = req.body ?? {};
 
   if (typeof userId !== "string" || typeof boardId !== "string") {
@@ -408,7 +754,7 @@ app.post("/board-member", async (req, res) => {
   }
 });
 
-app.put("/board-member/:memberId", async (req, res) => {
+app.put("/board-member/:memberId", authenticateToken, async (req, res) => {
   const { memberId } = req.params;
   const { role } = req.body ?? {};
 
@@ -450,18 +796,34 @@ app.delete("/board-member/:memberId", async (req, res) => {
 
 // ==================== SECTIONS ====================
 
-app.post("/section", async (req, res) => {
+app.post("/section", authenticateToken, async (req, res) => {
   const { title, boardId, position } = req.body ?? {};
 
-  if (typeof title !== "string" || typeof boardId !== "string" || typeof position !== "number") {
-    res.status(400).json({ error: "title, boardId, and position are required" });
+  if (
+    typeof title !== "string" ||
+    !title.trim() ||
+    typeof boardId !== "string" ||
+    typeof position !== "number" ||
+    !Number.isInteger(position) ||
+    position < 0
+  ) {
+    res
+      .status(400)
+      .json({ error: "title, boardId, and position are required" });
     return;
   }
 
   try {
+    if (!(await canEditBoard(boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+
     const section = await prisma.section.create({
       data: {
-        title,
+        title: title.trim(),
         boardId,
         position,
       },
@@ -474,15 +836,36 @@ app.post("/section", async (req, res) => {
   }
 });
 
-app.put("/section/:sectionId", async (req, res) => {
+app.put("/section/:sectionId", authenticateToken, async (req, res) => {
   const { sectionId } = req.params;
   const { title, position } = req.body ?? {};
 
   try {
+    const sectionAccess = await prisma.section.findUnique({
+      where: { id: sectionId },
+      select: { boardId: true },
+    });
+    if (!sectionAccess) {
+      res.status(404).json({ error: "List not found" });
+      return;
+    }
+    if (
+      !(await canEditBoard(sectionAccess.boardId, (req as any).user.userId))
+    ) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+    if (title !== undefined && (typeof title !== "string" || !title.trim())) {
+      res.status(400).json({ error: "title cannot be empty" });
+      return;
+    }
+
     const section = await prisma.section.update({
       where: { id: sectionId },
       data: {
-        ...(title !== undefined && { title }),
+        ...(title !== undefined && { title: title.trim() }),
         ...(position !== undefined && { position }),
       },
     });
@@ -500,10 +883,10 @@ app.get("/sections", async (req, res) => {
   try {
     const sections = await prisma.section.findMany({
       where: boardId ? { boardId: boardId as string } : undefined,
-      orderBy: { position: 'asc' },
+      orderBy: { position: "asc" },
       include: {
         issues: {
-          orderBy: { position: 'asc' },
+          orderBy: { position: "asc" },
           where: { deletedAt: null },
         },
       },
@@ -516,10 +899,27 @@ app.get("/sections", async (req, res) => {
   }
 });
 
-app.delete("/section/:sectionId", async (req, res) => {
+app.delete("/section/:sectionId", authenticateToken, async (req, res) => {
   const { sectionId } = req.params;
 
   try {
+    const sectionAccess = await prisma.section.findUnique({
+      where: { id: sectionId },
+      select: { boardId: true },
+    });
+    if (!sectionAccess) {
+      res.status(404).json({ error: "List not found" });
+      return;
+    }
+    if (
+      !(await canEditBoard(sectionAccess.boardId, (req as any).user.userId))
+    ) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+
     await prisma.section.delete({
       where: { id: sectionId },
     });
@@ -531,20 +931,54 @@ app.delete("/section/:sectionId", async (req, res) => {
   }
 });
 
-// ISSUES 
+// ISSUES
 
-app.post("/issue", async (req, res) => {
-  const { title, description, boardId, sectionId, position, priority, dueDate, startDate } = req.body ?? {};
+app.post("/issue", authenticateToken, async (req, res) => {
+  const {
+    title,
+    description,
+    boardId,
+    sectionId,
+    position,
+    priority,
+    dueDate,
+    startDate,
+  } = req.body ?? {};
 
-  if (typeof title !== "string" || typeof boardId !== "string" || typeof sectionId !== "string" || typeof position !== "number") {
-    res.status(400).json({ error: "title, boardId, sectionId, and position are required" });
+  if (
+    typeof title !== "string" ||
+    !title.trim() ||
+    typeof boardId !== "string" ||
+    typeof sectionId !== "string" ||
+    typeof position !== "number" ||
+    !Number.isInteger(position) ||
+    position < 0
+  ) {
+    res
+      .status(400)
+      .json({ error: "title, boardId, sectionId, and position are required" });
     return;
   }
 
   try {
+    const section = await prisma.section.findFirst({
+      where: { id: sectionId, boardId },
+      select: { id: true },
+    });
+    if (!section) {
+      res.status(400).json({ error: "The list does not belong to this board" });
+      return;
+    }
+    if (!(await canEditBoard(boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+
     const issue = await prisma.issue.create({
       data: {
-        title,
+        title: title.trim(),
         description: description || null,
         boardId,
         sectionId,
@@ -562,22 +996,163 @@ app.post("/issue", async (req, res) => {
   }
 });
 
-app.put("/issue/:issueId", async (req, res) => {
-  const { issueId } = req.params;
-  const { title, description, position, sectionId, priority, dueDate, startDate, completedAt } = req.body ?? {};
+app.put("/issue/move", authenticateToken, async (req, res) => {
+  const { issueId, sectionId, position } = req.body ?? {};
+
+  if (
+    typeof issueId !== "string" ||
+    typeof sectionId !== "string" ||
+    typeof position !== "number" ||
+    !Number.isInteger(position) ||
+    position < 0
+  ) {
+    res
+      .status(400)
+      .json({ error: "issueId, sectionId, and position are required" });
+    return;
+  }
 
   try {
+    const moving = await prisma.issue.findFirst({
+      where: { id: issueId, deletedAt: null },
+      select: { boardId: true, sectionId: true },
+    });
+    if (!moving) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+    const destination = await prisma.section.findFirst({
+      where: { id: sectionId, boardId: moving.boardId },
+      select: { id: true },
+    });
+    if (!destination) {
+      res
+        .status(400)
+        .json({ error: "The destination list does not belong to this board" });
+      return;
+    }
+    if (!(await canEditBoard(moving.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+
+    const issue = await prisma.$transaction(async (transaction) => {
+      const sourceIssues = await transaction.issue.findMany({
+        where: { sectionId: moving.sectionId, deletedAt: null },
+        orderBy: { position: "asc" },
+        select: { id: true },
+      });
+      const destinationIssues =
+        moving.sectionId === sectionId
+          ? sourceIssues
+          : await transaction.issue.findMany({
+              where: { sectionId, deletedAt: null },
+              orderBy: { position: "asc" },
+              select: { id: true },
+            });
+
+      if (moving.sectionId === sectionId) {
+        const orderedIds = sourceIssues
+          .map((issue) => issue.id)
+          .filter((id) => id !== issueId);
+        orderedIds.splice(Math.min(position, orderedIds.length), 0, issueId);
+        await Promise.all(
+          orderedIds.map((id, index) =>
+            transaction.issue.update({
+              where: { id },
+              data: { position: index },
+            }),
+          ),
+        );
+      } else {
+        const sourceIds = sourceIssues
+          .map((issue) => issue.id)
+          .filter((id) => id !== issueId);
+        const destinationIds = destinationIssues.map((issue) => issue.id);
+        destinationIds.splice(
+          Math.min(position, destinationIds.length),
+          0,
+          issueId,
+        );
+
+        await Promise.all([
+          ...sourceIds.map((id, index) =>
+            transaction.issue.update({
+              where: { id },
+              data: { position: index },
+            }),
+          ),
+          ...destinationIds.map((id, index) =>
+            transaction.issue.update({
+              where: { id },
+              data: { sectionId, position: index },
+            }),
+          ),
+        ]);
+      }
+
+      return transaction.issue.findUnique({ where: { id: issueId } });
+    });
+
+    res.json(issue);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to move issue" });
+  }
+});
+
+app.put("/issue/:issueId", authenticateToken, async (req, res) => {
+  const { issueId } = req.params;
+  const {
+    title,
+    description,
+    position,
+    sectionId,
+    priority,
+    dueDate,
+    startDate,
+    completedAt,
+  } = req.body ?? {};
+
+  try {
+    const issueAccess = await prisma.issue.findUnique({
+      where: { id: issueId },
+      select: { boardId: true },
+    });
+    if (!issueAccess) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+    if (!(await canEditBoard(issueAccess.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+    if (title !== undefined && (typeof title !== "string" || !title.trim())) {
+      res.status(400).json({ error: "title cannot be empty" });
+      return;
+    }
+
     const issue = await prisma.issue.update({
       where: { id: issueId },
       data: {
-        ...(title !== undefined && { title }),
+        ...(title !== undefined && { title: title.trim() }),
         ...(description !== undefined && { description }),
         ...(position !== undefined && { position }),
         ...(sectionId !== undefined && { sectionId }),
         ...(priority !== undefined && { priority }),
-        ...(dueDate !== undefined && { dueDate: dueDate ? new Date(dueDate) : null }),
-        ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : null }),
-        ...(completedAt !== undefined && { completedAt: completedAt ? new Date(completedAt) : null }),
+        ...(dueDate !== undefined && {
+          dueDate: dueDate ? new Date(dueDate) : null,
+        }),
+        ...(startDate !== undefined && {
+          startDate: startDate ? new Date(startDate) : null,
+        }),
+        ...(completedAt !== undefined && {
+          completedAt: completedAt ? new Date(completedAt) : null,
+        }),
       },
     });
 
@@ -585,30 +1160,6 @@ app.put("/issue/:issueId", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to update issue" });
-  }
-});
-
-app.put("/issue/move", async (req, res) => {
-  const { issueId, sectionId, position } = req.body ?? {};
-
-  if (typeof issueId !== "string" || typeof sectionId !== "string" || typeof position !== "number") {
-    res.status(400).json({ error: "issueId, sectionId, and position are required" });
-    return;
-  }
-
-  try {
-    const issue = await prisma.issue.update({
-      where: { id: issueId },
-      data: {
-        sectionId,
-        position,
-      },
-    });
-
-    res.json(issue);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to move issue" });
   }
 });
 
@@ -622,7 +1173,7 @@ app.get("/issues", async (req, res) => {
         ...(boardId && { boardId: boardId as string }),
         deletedAt: null,
       },
-      orderBy: { position: 'asc' },
+      orderBy: { position: "asc" },
       include: {
         labels: {
           include: {
@@ -675,7 +1226,7 @@ app.get("/issue/:issueId", async (req, res) => {
           include: {
             user: true,
           },
-          orderBy: { createdAt: 'desc' },
+          orderBy: { createdAt: "desc" },
         },
       },
     });
@@ -692,10 +1243,25 @@ app.get("/issue/:issueId", async (req, res) => {
   }
 });
 
-app.delete("/issue/:issueId", async (req, res) => {
+app.delete("/issue/:issueId", authenticateToken, async (req, res) => {
   const { issueId } = req.params;
 
   try {
+    const issueAccess = await prisma.issue.findUnique({
+      where: { id: issueId },
+      select: { boardId: true },
+    });
+    if (!issueAccess) {
+      res.status(404).json({ error: "Card not found" });
+      return;
+    }
+    if (!(await canEditBoard(issueAccess.boardId, (req as any).user.userId))) {
+      res
+        .status(403)
+        .json({ error: "You do not have permission to edit this board" });
+      return;
+    }
+
     await prisma.issue.update({
       where: { id: issueId },
       data: { deletedAt: new Date() },
@@ -870,8 +1436,14 @@ app.delete("/issue-label", async (req, res) => {
 app.post("/comment", async (req, res) => {
   const { content, userId, issueId } = req.body ?? {};
 
-  if (typeof content !== "string" || typeof userId !== "string" || typeof issueId !== "string") {
-    res.status(400).json({ error: "content, userId, and issueId are required" });
+  if (
+    typeof content !== "string" ||
+    typeof userId !== "string" ||
+    typeof issueId !== "string"
+  ) {
+    res
+      .status(400)
+      .json({ error: "content, userId, and issueId are required" });
     return;
   }
 
@@ -940,8 +1512,14 @@ app.delete("/comment/:commentId", async (req, res) => {
 app.post("/attachment", async (req, res) => {
   const { fileName, fileUrl, mimeType, size, issueId } = req.body ?? {};
 
-  if (typeof fileName !== "string" || typeof fileUrl !== "string" || typeof issueId !== "string") {
-    res.status(400).json({ error: "fileName, fileUrl, and issueId are required" });
+  if (
+    typeof fileName !== "string" ||
+    typeof fileUrl !== "string" ||
+    typeof issueId !== "string"
+  ) {
+    res
+      .status(400)
+      .json({ error: "fileName, fileUrl, and issueId are required" });
     return;
   }
 
@@ -982,16 +1560,26 @@ app.delete("/attachment/:attachmentId", async (req, res) => {
 
 app.post("/activity-log", async (req, res) => {
   const { action, details, userId, issueId } = req.body ?? {};
+  const activityActions = [
+    "CREATED",
+    "UPDATED",
+    "MOVED",
+    "ASSIGNED",
+    "COMMENTED",
+    "ATTACHED",
+    "DELETED",
+  ] as const;
+  const validAction = activityActions.find((candidate) => candidate === action);
 
-  if (typeof action !== "string") {
-    res.status(400).json({ error: "action is required" });
+  if (!validAction) {
+    res.status(400).json({ error: "A valid activity action is required" });
     return;
   }
 
   try {
     const activityLog = await prisma.activityLog.create({
       data: {
-        action,
+        action: validAction,
         details: details || null,
         userId: userId || null,
         issueId: issueId || null,
@@ -1018,7 +1606,7 @@ app.get("/activity-logs", async (req, res) => {
         ...(issueId && { issueId: issueId as string }),
         ...(userId && { userId: userId as string }),
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       include: {
         user: true,
         issue: true,
@@ -1031,9 +1619,6 @@ app.get("/activity-logs", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch activity logs" });
   }
 });
-
-
-
 
 app.listen(PORT, () => {
   console.log(`Server is listen on ${PORT}`);
