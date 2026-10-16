@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, Navigate, useParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useParams } from "react-router-dom";
 import {
   DndContext,
   DragOverlay,
@@ -24,6 +24,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { api, type Board, type Issue, type Section, WS_URL } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { IssueDetailsModal } from "./IssueDetailsModal";
 
 const collisionDetection: CollisionDetection = (args) => {
   const pointerHits = pointerWithin(args);
@@ -42,6 +43,7 @@ function dateInputValue(value?: string | null) {
 
 export function BoardPage({ view }: { view: BoardView }) {
   const { boardId } = useParams();
+  const location = useLocation();
   const { token, user, logout } = useAuth();
   const [board, setBoard] = useState<Board | null>(null);
   const [users, setUsers] = useState<string[]>([]);
@@ -51,6 +53,7 @@ export function BoardPage({ view }: { view: BoardView }) {
   const [editingBoard, setEditingBoard] = useState(false);
   const [boardTitle, setBoardTitle] = useState("");
   const [savingBoard, setSavingBoard] = useState(false);
+  const [detailsIssue, setDetailsIssue] = useState<Issue | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -63,6 +66,16 @@ export function BoardPage({ view }: { view: BoardView }) {
     if (!token || !boardId) return;
     void fetchBoard();
   }, [token, boardId]);
+
+  useEffect(() => {
+    if (!board || !location.hash) return;
+    const frame = window.requestAnimationFrame(() => {
+      document
+        .getElementById(decodeURIComponent(location.hash.slice(1)))
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [board, location.hash]);
 
   useEffect(() => {
     if (!boardId || !token) return;
@@ -445,6 +458,7 @@ export function BoardPage({ view }: { view: BoardView }) {
                     onRename={updateSection}
                     onDelete={deleteSection}
                     onToggleComplete={toggleComplete}
+                    onOpenDetails={setDetailsIssue}
                   />
                 ))}
                 <form
@@ -494,7 +508,7 @@ export function BoardPage({ view }: { view: BoardView }) {
         <nav className="board-dock" aria-label="Board navigation">
           <Link
             className={`dock-link ${view === "inbox" ? "is-active" : ""}`}
-            to={`/board/${board.id}/inbox`}
+            to="/inbox"
             aria-current={view === "inbox" ? "page" : undefined}
           >
             <span aria-hidden="true">▣</span>
@@ -502,7 +516,7 @@ export function BoardPage({ view }: { view: BoardView }) {
           </Link>
           <Link
             className={`dock-link ${view === "planner" ? "is-active" : ""}`}
-            to={`/board/${board.id}/planner`}
+            to="/planner"
             aria-current={view === "planner" ? "page" : undefined}
           >
             <span aria-hidden="true">◷</span>
@@ -516,11 +530,22 @@ export function BoardPage({ view }: { view: BoardView }) {
             <span aria-hidden="true">▥</span>
             Board
           </Link>
-          <Link className="dock-link" to="/" aria-label="Switch boards">
+          <Link className="dock-link" to="/boards" aria-label="Switch boards">
             <span aria-hidden="true">⇄</span>
             Switch boards
           </Link>
         </nav>
+      )}
+      {board && detailsIssue && (
+        <IssueDetailsModal
+          board={board}
+          issue={detailsIssue}
+          token={token}
+          userId={user.id}
+          onClose={() => setDetailsIssue(null)}
+          onError={setError}
+          onChanged={fetchBoard}
+        />
       )}
     </div>
   );
@@ -694,6 +719,7 @@ function KanbanColumn({
   onRename,
   onDelete,
   onToggleComplete,
+  onOpenDetails,
 }: {
   section: Section;
   token: string;
@@ -702,6 +728,7 @@ function KanbanColumn({
   onRename: (sectionId: string, title: string) => Promise<void>;
   onDelete: (sectionId: string) => Promise<void>;
   onToggleComplete: (issue: Issue) => Promise<void>;
+  onOpenDetails: (issue: Issue) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: columnId(section.id) });
   const [title, setTitle] = useState("");
@@ -851,6 +878,7 @@ function KanbanColumn({
               onChanged={onChanged}
               onError={onError}
               onToggleComplete={onToggleComplete}
+              onOpenDetails={onOpenDetails}
             />
           ))}
         </SortableContext>
@@ -893,12 +921,14 @@ function KanbanCard({
   onChanged,
   onError,
   onToggleComplete,
+  onOpenDetails,
 }: {
   issue: Issue;
   token: string;
   onChanged: () => Promise<void>;
   onError: (message: string) => void;
   onToggleComplete: (issue: Issue) => Promise<void>;
+  onOpenDetails: (issue: Issue) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(issue.title);
@@ -1068,6 +1098,9 @@ function KanbanCard({
             </button>
             <button type="button" onClick={() => setEditing(true)}>
               Edit
+            </button>
+            <button type="button" onClick={() => onOpenDetails(issue)}>
+              Details
             </button>
             <button
               type="button"
